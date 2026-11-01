@@ -1,0 +1,90 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: enterprise_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-enterprise_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      POSTGRES_DB: ${DB_NAME:-enterprise_core}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-enterprise_admin} -d ${DB_NAME:-enterprise_core}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - enterprise_net
+
+  minio:
+    image: minio/minio:latest
+    container_name: enterprise_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change_me_strong_secret_key}
+    ports:
+      - "9000:9000" # S3 API Port
+      - "9001:9001" # Web Console Port
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - enterprise_net
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: enterprise_nestjs_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${DB_USER:-enterprise_admin}:${DB_PASSWORD:-change_me_in_production}@postgres:5432/${DB_NAME:-enterprise_core}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-replace_with_64_byte_cryptographic_secret}
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET_EPHEMERAL: ephemeral-uploads
+      S3_BUCKET_PERSISTENT: compliance-docs
+    ports:
+      - "4000:4000"
+    networks:
+      - enterprise_net
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: enterprise_nextjs_web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: http://api:4000/api
+    ports:
+      - "3000:3000"
+    networks:
+      - enterprise_net
+
+volumes:
+  pg_data:
+  minio_data:
+
+networks:
+  enterprise_net:
+    driver: bridge
